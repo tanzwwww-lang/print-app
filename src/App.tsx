@@ -576,8 +576,8 @@ function App() {
         type: fieldData.type,
         x: fieldData.type === 'table' ? 0 : Math.max(0, Math.min(x - 50, 800)), // 多维表格组件占满画布宽度，其他组件限制在画布内
         y: Math.max(0, Math.min(y - 25, 1235)), // 限制在画布内，预留组件高度
-        width: fieldData.type === 'table' ? 900 : 100,
-        height: 50,
+        width: fieldData.type === 'table' ? 900 : (fieldData.type === 'grid' ? 180 : 100),
+        height: fieldData.type === 'grid' ? 90 : 45,
         // 如果是文本组件，设置默认文本内容
         ...(fieldData.type === 'text' && { textContent: '双击编辑文本' }),
         // 如果是多维表格组件，设置默认属性
@@ -591,11 +591,11 @@ function App() {
         }),
         // 如果是表格组件，设置默认属性
         ...(fieldData.type === 'grid' && { 
-          gridRows: 3, 
-          gridColumns: 3, 
+          gridRows: 2, 
+          gridColumns: 4, 
           gridCells: {},
-          gridColumnWidths: [33.33, 33.33, 33.34], // 默认3列等宽
-          gridRowHeights: [33.33, 33.33, 33.34], // 默认3行等高
+          gridColumnWidths: [25, 25, 25, 25], // 默认4列等宽
+          gridRowHeights: [50, 50], // 默认2行等高
           gridMergedCells: {} // 默认无合并单元格
         })
       };
