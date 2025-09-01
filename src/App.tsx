@@ -60,7 +60,8 @@ function App() {
   const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuide[]>([]);
   const [selectedComponent, setSelectedComponent] = useState<string | null>(null);
   const [showRecordModal, setShowRecordModal] = useState(false);
-  const [selectedRecord, setSelectedRecord] = useState<any>(null);
+  const [selectedRecords, setSelectedRecords] = useState<any[]>([]);
+  const [currentRecordIndex, setCurrentRecordIndex] = useState<number>(0);
   const [tableRecords, setTableRecords] = useState<any[]>([]);
   const [tableFields, setTableFields] = useState<any[]>([]);
   const [isLoadingRecords, setIsLoadingRecords] = useState(false);
@@ -253,7 +254,7 @@ function App() {
     }
     
     // 如果没有选中记录，显示字段名称
-    if (!selectedRecord) {
+    if (!selectedRecords || selectedRecords.length === 0) {
       return component.name;
     }
     
@@ -263,8 +264,9 @@ function App() {
       return component.name;
     }
     
-    // 获取记录中该字段的值
-    const fieldValue = selectedRecord.fields[field.id];
+    // 根据当前记录索引显示对应记录的值
+    const currentRecord = selectedRecords[currentRecordIndex] || selectedRecords[0];
+    const fieldValue = currentRecord.fields[field.id];
     return formatFieldValue(fieldValue, field.type);
   };
 
@@ -444,7 +446,9 @@ function App() {
         }, 0);
       });
     }
-  }, [selectedRecord, tableFields]);
+    // 重置当前记录索引
+    setCurrentRecordIndex(0);
+  }, [selectedRecords, tableFields]);
 
   const handleComponentMouseDown = (e: React.MouseEvent, componentId: string) => {
     e.preventDefault();
@@ -801,6 +805,386 @@ function App() {
     
     const canvasRect = canvasElement.getBoundingClientRect();
     
+    // 如果选择了多条记录，为每条记录生成独立的打印页面
+    if (selectedRecords.length > 1) {
+      const allPagesContent = await Promise.all(selectedRecords.map(async (record, recordIndex) => {
+        // 临时设置当前记录索引
+        const tempCurrentRecordIndex = recordIndex;
+        
+        // 为当前记录生成组件内容
+        const componentContents = await Promise.all(canvasComponents.map(async component => {
+          if (component.type === 'table' && component.tableFields && component.tableFields.length > 0 && component.selectedTableId) {
+            // 多维表格组件在打印时显示完整表格数据（保持原有逻辑）
+            const fieldsToShow = component.selectedFields && component.selectedFields.length > 0
+              ? component.fieldOrder?.map(fieldId => 
+                  component.tableFields?.find(f => f.id === fieldId)
+                ).filter(Boolean) || []
+              : component.tableFields || [];
+            
+            if (fieldsToShow.length === 0) {
+              return `
+                <div class="print-component" style="
+                  left: ${component.x}px;
+                  top: ${component.y}px;
+                  width: ${component.width}px;
+                  height: ${component.height}px;
+                  font-size: ${component.fontSize || 18}px;
+                  color: ${component.color || '#000000'};
+                  font-weight: ${component.fontWeight || 'normal'};
+                  text-align: ${component.textAlign || 'center'};
+                  line-height: ${component.lineHeight || 1.5};
+                ">
+                  ${component.textContent || '多维表格'}
+                </div>
+              `;
+            }
+            
+            // 根据打印模式获取表格记录数据
+            const records = component.printMode === 'current' 
+              ? await fetchCurrentViewRecords(component.selectedTableId)
+              : await fetchTableRecords(component.selectedTableId);
+            
+            // 计算每列的内容最大长度（包括字段名和数据值）
+            const columnContentLengths: number[] = [];
+            
+            // 如果需要显示序号列，添加序号列的内容长度
+            if (component.showRowNumber) {
+              // 序号列的最大长度（考虑"序号"标题和最大行号）
+              const maxRowNumber = records.length;
+              const rowNumberLength = Math.max(2, maxRowNumber.toString().length); // "序号"长度为2
+              columnContentLengths.push(rowNumberLength);
+            }
+            
+            // 添加字段列的内容长度
+            fieldsToShow.forEach(field => {
+              // 字段名长度
+              let maxLength = field.name.length;
+              
+              // 遍历所有记录，找出该字段的最大内容长度
+              records.forEach(record => {
+                const fieldValue = record.fields[field.id];
+                const displayValue = formatFieldValue(fieldValue, field.type);
+                maxLength = Math.max(maxLength, displayValue.length);
+              });
+              
+              columnContentLengths.push(maxLength);
+            });
+            
+            // 计算列宽分配
+            const totalContentLength = columnContentLengths.reduce((sum, length) => sum + length, 0);
+            const availableWidth = component.width - 20; // 减去padding
+            const minColumnWidth = 60; // 最小列宽
+            
+            let columnWidths: number[];
+            if (totalContentLength === 0) {
+              // 如果没有内容，平均分配
+              const totalColumns = (component.showRowNumber ? 1 : 0) + fieldsToShow.length;
+              columnWidths = new Array(totalColumns).fill(availableWidth / totalColumns);
+            } else {
+              // 根据内容长度按比例分配，但确保最小宽度
+              columnWidths = columnContentLengths.map(length => {
+                const proportionalWidth = (length / totalContentLength) * availableWidth;
+                return Math.max(minColumnWidth, proportionalWidth);
+              });
+              
+              // 如果总宽度超出可用宽度，按比例缩放
+              const totalWidth = columnWidths.reduce((sum, width) => sum + width, 0);
+              if (totalWidth > availableWidth) {
+                const scale = availableWidth / totalWidth;
+                columnWidths = columnWidths.map(width => width * scale);
+              }
+            }
+            
+            let tableHTML = `
+              <div style="
+                position: absolute;
+                left: ${component.x}px;
+                top: ${component.y}px;
+                width: ${component.width}px;
+                height: ${component.height}px;
+                background: #fff;
+                border-radius: 4px;
+                overflow: hidden;
+                padding: 10px;
+                box-sizing: border-box;
+              ">
+                <table style="
+                  width: 100%;
+                  border-collapse: collapse;
+                  font-size: ${component.fontSize || 12}px;
+                  color: ${component.color || '#000000'};
+                  font-weight: ${component.fontWeight || 'normal'};
+                  table-layout: fixed;
+                ">
+                  <thead>
+                    <tr style="background-color: #f5f5f5; font-weight: bold;">`;
+            
+            // 添加表头
+            let columnIndex = 0;
+            if (component.showRowNumber) {
+              tableHTML += `<th style="
+                width: ${columnWidths[columnIndex]}px;
+                border: 1px solid #ddd;
+                padding: 8px 4px;
+                text-align: center;
+                word-wrap: break-word;
+                overflow: hidden;
+              ">序号</th>`;
+              columnIndex++;
+            }
+            
+            fieldsToShow.forEach(field => {
+              tableHTML += `<th style="
+                width: ${columnWidths[columnIndex]}px;
+                border: 1px solid #ddd;
+                padding: 8px 4px;
+                text-align: left;
+                word-wrap: break-word;
+                overflow: hidden;
+              ">${field.name}</th>`;
+              columnIndex++;
+            });
+            
+            tableHTML += `</tr></thead><tbody>`;
+            
+            // 添加数据行
+            records.forEach((record, index) => {
+              tableHTML += `<tr>`;
+              
+              let columnIndex = 0;
+              if (component.showRowNumber) {
+                tableHTML += `<td style="
+                  width: ${columnWidths[columnIndex]}px;
+                  border: 1px solid #ddd;
+                  padding: 8px 4px;
+                  text-align: center;
+                  word-wrap: break-word;
+                  overflow: hidden;
+                ">${index + 1}</td>`;
+                columnIndex++;
+              }
+              
+              fieldsToShow.forEach(field => {
+                const fieldValue = record.fields[field.id];
+                const displayValue = formatFieldValue(fieldValue, field.type);
+                tableHTML += `<td style="
+                  width: ${columnWidths[columnIndex]}px;
+                  border: 1px solid #ddd;
+                  padding: 8px 4px;
+                  text-align: left;
+                  word-wrap: break-word;
+                  overflow: hidden;
+                  font-size: ${Math.max(10, (component.fontSize || 12) - 1)}px;
+                ">${displayValue}</td>`;
+                columnIndex++;
+              });
+              
+              tableHTML += `</tr>`;
+            });
+            
+            tableHTML += `</tbody></table></div>`;
+            return tableHTML;
+          } else if (component.type === 'grid') {
+            // 新的表格组件打印逻辑（保持原有逻辑）
+            const rows = component.gridRows || 3;
+            const columns = component.gridColumns || 3;
+            const cells = component.gridCells || {};
+            
+            let tableHTML = `
+              <div style="
+                position: absolute;
+                left: ${component.x}px;
+                top: ${component.y}px;
+                width: ${component.width}px;
+                height: ${component.height}px;
+                background: #fff;
+                border-radius: 4px;
+                overflow: visible;
+              ">
+                <table style="
+                  width: 100%;
+                  height: 100%;
+                  border-collapse: collapse;
+                  font-size: ${component.fontSize || 14}px;
+                  color: ${component.color || '#000000'};
+                  font-weight: ${component.fontWeight || 'normal'};
+                  table-layout: fixed;
+                ">
+                  <tbody>`;
+            
+            for (let row = 0; row < rows; row++) {
+              const rowHeight = component.gridRowHeights?.[row] || (100 / rows);
+              tableHTML += `<tr style="height: ${rowHeight}%;">`;
+              for (let col = 0; col < columns; col++) {
+                const cellKey = `${row}-${col}`;
+                const cellContent = cells[cellKey];
+                const columnWidth = component.gridColumnWidths?.[col] || (100 / columns);
+                
+                // 检查单元格是否被合并覆盖
+                if (isCellCovered(component.gridMergedCells, row, col)) {
+                  continue;
+                }
+                
+                // 检查是否为合并单元格的起始位置
+                const mergeInfo = component.gridMergedCells?.[cellKey];
+                
+                let cellText = '';
+                if (cellContent && cellContent.length > 0) {
+                  const firstComponent = cellContent[0];
+                  if (firstComponent.type === 'text') {
+                    cellText = firstComponent.textContent || '';
+                  } else if (selectedRecords.length > 0) {
+                    // 查找对应的字段
+                    const field = tableFields.find(f => f.name === firstComponent.name);
+                    if (field) {
+                      const currentRecord = selectedRecords[tempCurrentRecordIndex];
+                      if (currentRecord && currentRecord.fields[field.id] !== undefined) {
+                        cellText = formatFieldValue(currentRecord.fields[field.id], field.type);
+                      } else {
+                        cellText = firstComponent.name;
+                      }
+                    } else {
+                      cellText = firstComponent.name;
+                    }
+                  } else {
+                    cellText = firstComponent.name;
+                  }
+                }
+                
+                tableHTML += `
+                  <td ${mergeInfo ? `colspan="${mergeInfo.colspan}" rowspan="${mergeInfo.rowspan}"` : ''} style="
+                    width: ${columnWidth}%;
+                    border: 1px solid #333;
+                    padding: 4px;
+                    text-align: ${component.textAlign || 'center'};
+                    vertical-align: middle;
+                    font-size: ${component.fontSize || 14}px;
+                    color: ${component.color || '#000000'};
+                    font-weight: ${component.fontWeight || 'normal'};
+                    line-height: ${component.lineHeight || 1.5};
+                  ">
+                    ${cellText}
+                  </td>
+                `;
+                
+                // 如果是合并单元格，跳过被合并的列
+                if (mergeInfo && mergeInfo.colspan > 1) {
+                  col += mergeInfo.colspan - 1;
+                }
+              }
+              tableHTML += '</tr>';
+            }
+            
+            tableHTML += `
+                  </tbody>
+                </table>
+              </div>
+            `;
+            
+            return tableHTML;
+          } else {
+            // 其他组件使用当前记录的数据
+            const tempComponent = { ...component };
+            
+            // 临时修改getComponentDisplayValue的逻辑
+            let displayValue = '';
+            if (tempComponent.type === 'text') {
+              displayValue = tempComponent.textContent || '请设置文本内容';
+            } else if (selectedRecords.length > 0) {
+              // 查找对应的字段
+              const field = tableFields.find(f => f.name === tempComponent.name);
+              if (field) {
+                const currentRecord = selectedRecords[tempCurrentRecordIndex];
+                if (currentRecord && currentRecord.fields[field.id] !== undefined) {
+                  displayValue = formatFieldValue(currentRecord.fields[field.id], field.type);
+                } else {
+                  displayValue = tempComponent.name;
+                }
+              } else {
+                displayValue = tempComponent.name;
+              }
+            } else {
+              displayValue = tempComponent.name;
+            }
+            
+            return `
+              <div class="print-component" style="
+                left: ${tempComponent.x}px;
+                top: ${tempComponent.y}px;
+                width: ${tempComponent.width}px;
+                height: ${tempComponent.height}px;
+                font-size: ${tempComponent.fontSize || 18}px;
+                color: ${tempComponent.color || '#000000'};
+                font-weight: ${tempComponent.fontWeight || 'normal'};
+                text-align: ${tempComponent.textAlign || 'left'};
+                line-height: ${tempComponent.lineHeight || 1.5};
+              ">
+                ${displayValue}
+              </div>
+            `;
+          }
+        }));
+        
+        return `
+          <div class="print-canvas" style="page-break-after: ${recordIndex < selectedRecords.length - 1 ? 'always' : 'auto'};">
+            ${componentContents.join('')}
+          </div>
+        `;
+      }));
+      
+      printWindow.document.write(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>画布打印 - 多条记录</title>
+            <style>
+              body {
+                margin: 0;
+                padding: 20px;
+                font-family: Arial, sans-serif;
+              }
+              .print-canvas {
+                position: relative;
+                width: 900px;
+                height: 1285px;
+                border: 1px solid #ccc;
+                background: white;
+                margin: 0 auto 20px auto;
+              }
+              .print-component {
+                position: absolute;
+                border: 1px solid #333;
+                background: #f9f9f9;
+                display: flex;
+                align-items: center;
+                font-size: 12px;
+                border-radius: 4px;
+              }
+              @media print {
+                body { margin: 0; padding: 0; }
+                .print-canvas { border: none; margin: 0 auto; }
+                .print-component { border: none; }
+              }
+            </style>
+          </head>
+          <body>
+            ${allPagesContent.join('')}
+          </body>
+        </html>
+      `);
+      
+      printWindow.document.close();
+      printWindow.focus();
+      
+      setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+      }, 250);
+      
+      return;
+    }
+    
+    // 单条记录或无选中记录时的原有逻辑
     // 异步生成组件内容
     const componentContents = await Promise.all(canvasComponents.map(async component => {
       if (component.type === 'table' && component.tableFields && component.tableFields.length > 0 && component.selectedTableId) {
@@ -1219,7 +1603,6 @@ function App() {
               background: #f9f9f9;
               display: flex;
               align-items: center;
-              justify-content: center;
               font-size: 12px;
               border-radius: 4px;
             }
@@ -2038,6 +2421,29 @@ function App() {
             <div className="panel-header">
               <h3 className="panel-title">排版</h3>
               <div className="header-buttons">
+                {selectedRecords.length > 1 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <button 
+                      className="record-nav-button"
+                      onClick={() => setCurrentRecordIndex(Math.max(0, currentRecordIndex - 1))}
+                      disabled={currentRecordIndex === 0}
+                      title="上一条记录"
+                    >
+                      ◀
+                    </button>
+                    <span style={{ fontSize: '12px', color: '#666', minWidth: '60px', textAlign: 'center' }}>
+                      {currentRecordIndex + 1}/{selectedRecords.length}
+                    </span>
+                    <button 
+                      className="record-nav-button"
+                      onClick={() => setCurrentRecordIndex(Math.min(selectedRecords.length - 1, currentRecordIndex + 1))}
+                      disabled={currentRecordIndex === selectedRecords.length - 1}
+                      title="下一条记录"
+                    >
+                      ▶
+                    </button>
+                  </div>
+                )}
                 <button 
                   className="select-template-button"
                   onClick={() => setShowTemplateModal(true)}
@@ -2345,26 +2751,207 @@ function App() {
                                                 margin: '1px 0'
                                               }}
                                             >
-                                              <span 
-                                                style={{ 
-                                                  flex: 1, 
-                                                  overflow: 'hidden', 
-                                                  textOverflow: 'ellipsis',
-                                                  cursor: 'pointer',
-                                                  padding: '2px 4px',
-                                                  borderRadius: '2px',
-                                                  backgroundColor: selectedComponent === cellComp.id ? '#e6f3ff' : 'transparent',
-                                                  border: selectedComponent === cellComp.id ? '1px solid #1890ff' : '1px solid transparent'
-                                                }}
-                                                onClick={(e) => {
-                                                  e.stopPropagation();
-                                                  // 选中单元格中的组件
-                                                  setSelectedComponent(cellComp.id);
-                                                }}
-                                                title="点击选中组件"
-                                              >
-                                                {getComponentDisplayValue(cellComp)}
-                                              </span>
+                                              {(() => {
+                                                const displayValue = getComponentDisplayValue(cellComp);
+                                                if (displayValue === '__TABLE_COMPONENT__' && cellComp.type === 'table') {
+                                                  // 渲染多维表格组件的数据
+                                                  if (!cellComp.selectedTableId || !cellComp.selectedFields || cellComp.selectedFields.length === 0) {
+                                                    return (
+                                                      <span 
+                                                        style={{ 
+                                                          flex: 1, 
+                                                          overflow: 'hidden', 
+                                                          textOverflow: 'ellipsis',
+                                                          cursor: 'pointer',
+                                                          padding: '2px 4px',
+                                                          borderRadius: '2px',
+                                                          backgroundColor: selectedComponent === cellComp.id ? '#e6f3ff' : 'transparent',
+                                                          border: selectedComponent === cellComp.id ? '1px solid #1890ff' : '1px solid transparent',
+                                                          color: '#999',
+                                                          fontStyle: 'italic'
+                                                        }}
+                                                        onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          setSelectedComponent(cellComp.id);
+                                                        }}
+                                                        title="请配置多维表格"
+                                                      >
+                                                        未配置
+                                                      </span>
+                                                    );
+                                                  }
+                                                  
+                                                  // 获取要显示的字段
+                                                  const fieldsToShow = cellComp.tableFields?.filter(field => 
+                                                    cellComp.selectedFields?.includes(field.id)
+                                                  ) || [];
+                                                  
+                                                  if (fieldsToShow.length === 0) {
+                                                    return (
+                                                      <span 
+                                                        style={{ 
+                                                          flex: 1, 
+                                                          overflow: 'hidden', 
+                                                          textOverflow: 'ellipsis',
+                                                          cursor: 'pointer',
+                                                          padding: '2px 4px',
+                                                          borderRadius: '2px',
+                                                          backgroundColor: selectedComponent === cellComp.id ? '#e6f3ff' : 'transparent',
+                                                          border: selectedComponent === cellComp.id ? '1px solid #1890ff' : '1px solid transparent',
+                                                          color: '#999',
+                                                          fontStyle: 'italic'
+                                                        }}
+                                                        onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          setSelectedComponent(cellComp.id);
+                                                        }}
+                                                        title="请选择要显示的字段"
+                                                      >
+                                                        无字段
+                                                      </span>
+                                                    );
+                                                  }
+                                                  
+                                                  // 渲染小型表格
+                                                  return (
+                                                    <div 
+                                                      style={{ 
+                                                        flex: 1,
+                                                        cursor: 'pointer',
+                                                        padding: '2px',
+                                                        borderRadius: '2px',
+                                                        backgroundColor: selectedComponent === cellComp.id ? '#e6f3ff' : 'transparent',
+                                                        border: selectedComponent === cellComp.id ? '1px solid #1890ff' : '1px solid transparent',
+                                                        overflow: 'hidden'
+                                                      }}
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setSelectedComponent(cellComp.id);
+                                                      }}
+                                                      title="多维表格组件"
+                                                    >
+                                                      <table style={{
+                                                        width: '100%',
+                                                        fontSize: '8px',
+                                                        borderCollapse: 'collapse',
+                                                        border: '1px solid #ddd'
+                                                      }}>
+                                                        <thead>
+                                                          <tr>
+                                                            {fieldsToShow.slice(0, 3).map((field, index) => (
+                                                              <th key={field.id || index} style={{
+                                                                border: '1px solid #ddd',
+                                                                padding: '1px 2px',
+                                                                backgroundColor: '#f5f5f5',
+                                                                fontSize: '7px',
+                                                                textAlign: 'center',
+                                                                overflow: 'hidden',
+                                                                textOverflow: 'ellipsis',
+                                                                whiteSpace: 'nowrap',
+                                                                maxWidth: '30px'
+                                                              }}>
+                                                                {field.name.length > 4 ? field.name.substring(0, 4) + '...' : field.name}
+                                                              </th>
+                                                            ))}
+                                                            {fieldsToShow.length > 3 && (
+                                                              <th style={{
+                                                                border: '1px solid #ddd',
+                                                                padding: '1px 2px',
+                                                                backgroundColor: '#f5f5f5',
+                                                                fontSize: '7px',
+                                                                textAlign: 'center'
+                                                              }}>...</th>
+                                                            )}
+                                                          </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                          {selectedRecords && selectedRecords.length > 0 ? (
+                                                            selectedRecords.slice(0, 2).map((record, recordIndex) => (
+                                                              <tr key={recordIndex}>
+                                                                {fieldsToShow.slice(0, 3).map((field, fieldIndex) => {
+                                                                  const fieldValue = record.fields[field.id];
+                                                                  const displayValue = formatFieldValue(fieldValue, field.type);
+                                                                  return (
+                                                                    <td key={field.id || fieldIndex} style={{
+                                                                      border: '1px solid #ddd',
+                                                                      padding: '1px 2px',
+                                                                      fontSize: '7px',
+                                                                      textAlign: 'left',
+                                                                      overflow: 'hidden',
+                                                                      textOverflow: 'ellipsis',
+                                                                      whiteSpace: 'nowrap',
+                                                                      maxWidth: '30px'
+                                                                    }}>
+                                                                      {displayValue && displayValue.length > 6 ? displayValue.substring(0, 6) + '...' : displayValue || '-'}
+                                                                    </td>
+                                                                  );
+                                                                })}
+                                                                {fieldsToShow.length > 3 && (
+                                                                  <td style={{
+                                                                    border: '1px solid #ddd',
+                                                                    padding: '1px 2px',
+                                                                    fontSize: '7px',
+                                                                    textAlign: 'center'
+                                                                  }}>...</td>
+                                                                )}
+                                                              </tr>
+                                                            ))
+                                                          ) : (
+                                                            <tr>
+                                                              <td colSpan={Math.min(fieldsToShow.length, 3) + (fieldsToShow.length > 3 ? 1 : 0)} style={{
+                                                                border: '1px solid #ddd',
+                                                                padding: '1px 2px',
+                                                                fontSize: '7px',
+                                                                textAlign: 'center',
+                                                                color: '#999',
+                                                                fontStyle: 'italic'
+                                                              }}>
+                                                                无数据
+                                                              </td>
+                                                            </tr>
+                                                          )}
+                                                          {selectedRecords && selectedRecords.length > 2 && (
+                                                            <tr>
+                                                              <td colSpan={Math.min(fieldsToShow.length, 3) + (fieldsToShow.length > 3 ? 1 : 0)} style={{
+                                                                border: '1px solid #ddd',
+                                                                padding: '1px 2px',
+                                                                fontSize: '7px',
+                                                                textAlign: 'center',
+                                                                color: '#999'
+                                                              }}>
+                                                                +{selectedRecords.length - 2}行
+                                                              </td>
+                                                            </tr>
+                                                          )}
+                                                        </tbody>
+                                                      </table>
+                                                    </div>
+                                                  );
+                                                } else {
+                                                  // 其他组件类型的渲染
+                                                  return (
+                                                    <span 
+                                                      style={{ 
+                                                        flex: 1, 
+                                                        overflow: 'hidden', 
+                                                        textOverflow: 'ellipsis',
+                                                        cursor: 'pointer',
+                                                        padding: '2px 4px',
+                                                        borderRadius: '2px',
+                                                        backgroundColor: selectedComponent === cellComp.id ? '#e6f3ff' : 'transparent',
+                                                        border: selectedComponent === cellComp.id ? '1px solid #1890ff' : '1px solid transparent'
+                                                      }}
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setSelectedComponent(cellComp.id);
+                                                      }}
+                                                      title="点击选中组件"
+                                                    >
+                                                      {displayValue === '__GRID_COMPONENT__' ? '表格组件' : displayValue}
+                                                    </span>
+                                                  );
+                                                }
+                                              })()}
                                               <button
                                                 style={{
                                                   background: '#ff4d4f',
@@ -2587,7 +3174,7 @@ function App() {
         <div className="modal-overlay" onClick={() => setShowRecordModal(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h3>选择记录</h3>
+              <h3>选择记录 ({selectedRecords.length}条已选)</h3>
               <button 
                 className="modal-close-button"
                 onClick={() => setShowRecordModal(false)}
@@ -2604,7 +3191,30 @@ function App() {
                     <table className="records-table">
                       <thead>
                          <tr>
-                           <th>操作</th>
+                           <th>
+                             <input
+                               type="checkbox"
+                               checked={selectedRecords.length === tableRecords.slice((currentPage - 1) * recordsPerPage, currentPage * recordsPerPage).length && tableRecords.length > 0}
+                               onChange={(e) => {
+                                 const currentPageRecords = tableRecords.slice((currentPage - 1) * recordsPerPage, currentPage * recordsPerPage);
+                                 if (e.target.checked) {
+                                   // 全选当前页
+                                   const newSelected = [...selectedRecords];
+                                   currentPageRecords.forEach(record => {
+                                     if (!newSelected.find(r => r.recordId === record.recordId)) {
+                                       newSelected.push(record);
+                                     }
+                                   });
+                                   setSelectedRecords(newSelected);
+                                 } else {
+                                   // 取消选择当前页
+                                   const currentPageIds = currentPageRecords.map(r => r.recordId);
+                                   setSelectedRecords(selectedRecords.filter(r => !currentPageIds.includes(r.recordId)));
+                                 }
+                               }}
+                               title="全选/取消全选当前页"
+                             />
+                           </th>
                            {tableFields.map((field) => (
                              <th key={field.id}>{field.name}</th>
                            ))}
@@ -2616,15 +3226,19 @@ function App() {
                           .map((record) => (
                           <tr key={record.recordId}>
                              <td>
-                               <button 
-                                 className="select-record-btn"
-                                 onClick={() => {
-                                   setSelectedRecord(record);
-                                   setShowRecordModal(false);
+                               <input
+                                 type="checkbox"
+                                 checked={selectedRecords.some(r => r.recordId === record.recordId)}
+                                 onChange={(e) => {
+                                   if (e.target.checked) {
+                                     // 添加到选中列表
+                                     setSelectedRecords([...selectedRecords, record]);
+                                   } else {
+                                     // 从选中列表移除
+                                     setSelectedRecords(selectedRecords.filter(r => r.recordId !== record.recordId));
+                                   }
                                  }}
-                               >
-                                 选择
-                               </button>
+                               />
                              </td>
                              {tableFields.map((field) => (
                                <td key={field.id} title={formatFieldValue(record.fields[field.id], field.type)}>
@@ -2683,6 +3297,37 @@ function App() {
               ) : (
                 <div className="no-records-message">暂无数据记录</div>
               )}
+              
+              {/* 底部按钮 */}
+              <div className="modal-footer" style={{ marginTop: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ color: '#666', fontSize: '14px' }}>
+                  已选择 {selectedRecords.length} 条记录
+                </div>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button 
+                    className="btn-secondary"
+                    onClick={() => {
+                      setSelectedRecords([]);
+                    }}
+                  >
+                    清空选择
+                  </button>
+                  <button 
+                    className="btn-secondary"
+                    onClick={() => setShowRecordModal(false)}
+                  >
+                    取消
+                  </button>
+                  <button 
+                    className="btn-primary"
+                    onClick={() => {
+                      setShowRecordModal(false);
+                    }}
+                  >
+                    确认选择
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
