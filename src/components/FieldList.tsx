@@ -6,6 +6,7 @@ const { Text } = Typography;
 
 interface FieldListProps {
   className?: string;
+  onDragStart?: (data: any) => void;
 }
 
 const FieldList: React.FC<FieldListProps> = ({ className }) => {
